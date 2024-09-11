@@ -16,11 +16,32 @@
 --
 -- The updates are applied with 'setField', on the 'Rep', so you must first
 -- convert it to Rep and then back to the final object.
+--
+-- The idea of this module is that I'm wondering what was the problem with polymorphic updates and a typeclass implementation.
+--
+-- With this implementation, I now know that this is possible. I'm just
+-- wondering now what are the limitations I'm not yet aware which blocks the
+-- implementation in GHC.
+--
+-- The idea could be that the record update syntax:
+--
+-- @
+-- foo {
+--   field1 = 10,
+--   field2 = 20
+-- }
+-- @
+--
+-- Could be "desugared" to:
+--
+-- @
+-- withSetters (setField @"field1" 10 . setField @"field2" 20) foo
+-- @
 module HasField where
 
 import GHC.Generics
 import Prelude
-import Data.Kind (Type)
+import Data.Kind (Type, Constraint)
 
 -- * API
 
@@ -38,7 +59,7 @@ withSetters setters a = GHC.Generics.to . setters . GHC.Generics.from $ a
 
 -- | @setField @"fieldName" newValue record@ is similar to @record { fieldName = newValue }@,
 -- but can be combined with other 'setField'.
-setField :: forall fieldName path rep v x. (Just path ~ GetFieldPath fieldName rep, SetPath path rep v) => v -> rep x -> ResultRep path rep v x
+setField :: forall fieldName path rep v x. (path ~ FromJust (GetFieldPath fieldName rep), SetPath path rep v) => v -> rep x -> ResultRep path rep v x
 setField v x = setPath @path v x
 
 -- * Internal
@@ -85,6 +106,7 @@ type family GetFieldPath fieldName x where
   GetFieldPath fieldName (M1 S (MetaSel (Just fieldName) pack strict lazy) (Rec0 b)) = Just '[]
   GetFieldPath fieldName (M1 S (MetaSel (Just fieldName') pack strict lazy) (Rec0 b)) = Nothing
 
+
 type family Cons (t :: Dir) (jl :: Maybe [Dir]) :: Maybe [Dir] where
   Cons _ Nothing = Nothing
   Cons x (Just l) = Just (x ': l)
@@ -99,20 +121,37 @@ type family MergePaths a b where
 setBoth :: a -> a -> Tortue x -> Tortue a
 setBoth ch' t' = withSetters (setField @"cheval" ch' . setField @"tortue" t')
 
+type family SetFields l repIn repOut :: Constraint where
+  SetFields '[] repIn repOut = ()
+  SetFields ( '( fieldName, newType) ': xs ) repIn repOut = Cheval (FromJust (GetFieldPath fieldName repIn)) repIn newType xs repOut
+
+type family Cheval a b c d e where
+  Cheval path repIn newType xs repOut = (SetPath path repIn newType, Crevetor path repIn newType xs (ResultRep path repIn newType) repOut)
+
+type family Crevetor a b c xs rep repOut where
+  Crevetor path rep newType xs repIntermediate repOut = (ResultRep path rep newType ~ repIntermediate, SetFields xs repIntermediate repOut)
+
+type family FromJust x where
+  FromJust (Just x) = x
+
 -- | The same, but works on any type which have a @tortue@ and @cheval@ fields
 --
 -- TODO: work on the type constraint in order to have something simpler ;)
+-- I started to integrate all constraints in `SetFields`, the biggest problem
+-- is to thread the intermediate rep
 genericSetBoth :: (Generic c, Generic b
-   , GetFieldPath "tortue" (Rep b) ~ Just pathTortue
-   , SetPath pathTortue (Rep b) a
-   , ResultRep pathTortue (Rep b) a ~ rep2
-   , GetFieldPath "cheval" rep2 ~ Just pathCheval
-   , SetPath pathCheval rep2 a
-   , ResultRep pathCheval rep2 a ~ rep3
-   , Rep c ~ rep3
-   ) => a -> a -> b -> c
-genericSetBoth ch' t' t = GHC.Generics.to $ setField @"cheval" ch' $ setField @"tortue" t' $ GHC.Generics.from t
+   , SetFields '[ '( "tortue", a), '( "cheval", a) ] (Rep b) (Rep c)
 
+   , Rep b ~ rep
+   , GetFieldPath "tortue" rep ~ Just pathTortue
+   , ResultRep pathTortue rep a ~ repIntermediate
+
+   , GetFieldPath "cheval" repIntermediate ~ Just pathCheval
+   , ResultRep pathCheval repIntermediate a ~ repFinal
+
+   , Rep c ~ repFinal
+   ) => a -> a -> b -> c
+genericSetBoth ch' t' = withSetters (setField @"cheval" ch' . setField @"tortue" t')
 
 -- * Examples
 data Tortue t = Tortue {cheval :: t, tortue :: t} deriving (Show, Generic)
